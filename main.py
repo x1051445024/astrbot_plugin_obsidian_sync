@@ -4,6 +4,7 @@ Obsidian 知识库同步插件 for AstrBot
 - 支持每日定时或定时间隔同步
 - 通过 WebUI 配置面板设置参数
 - 检测 Obsidian 目录变更后自动增量更新知识库
+- 嵌入缓存：仅对变更文件调 API，全量向量合并后重建索引
 - 支持命令权限控制与同步状态记录
 - 支持配置面板手动同步与状态回显
 """
@@ -42,7 +43,7 @@ def _detect_data_dir() -> pathlib.Path:
     for c in candidates:
         if c.exists():
             return c
-    # 4. 兜底：向上两级
+    # 4. 兜底
     return this_file.parent.parent.parent
 
 
@@ -53,9 +54,11 @@ TMP_DIR = ASTRBOT_DATA / "plugin_data"
 STATUS_FILE = ASTRBOT_DATA / "plugin_data" / "obsidian_sync_status.json"
 REPORT_FILE = ASTRBOT_DATA / "plugin_data" / "obsidian_sync_status.md"
 FILE_STATE_FILE = ASTRBOT_DATA / "plugin_data" / "obsidian_sync_file_states.json"
+# 嵌入缓存：保存所有文件的向量，避免每次全量调 API
+EMBED_CACHE_FILE = ASTRBOT_DATA / "plugin_data" / "obsidian_sync_embed_cache.json"
 
 
-@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.5.0")
+@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.7.0")
 class ObsidianSync(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -123,11 +126,6 @@ class ObsidianSync(Star):
     # ── 配置面板只读状态写回 ──────────────────────────────
 
     def _persist_readonly_status(self, ok: bool, message: str, stage: str, changed: int = 0, deleted: int = 0):
-        """
-        将同步结果写回到配置文件，使 WebUI 配置面板能看到：
-        - 上次同步时间 / 状态 / 说明
-        - 手动同步开关自动复位
-        """
         try:
             cfg_path = ASTRBOT_DATA / "config" / "obsidian_sync_config.json"
             if not cfg_path.exists():
@@ -217,6 +215,29 @@ class ObsidianSync(Star):
             json.dump(state, f, ensure_ascii=False, indent=2)
         os.replace(tmp, FILE_STATE_FILE)
 
+    # ── 嵌入缓存 ──────────────────────────────────────────
+
+    def _load_embed_cache(self) -> dict:
+        """加载嵌入缓存，格式: { "source/path.md": { "embedding": [...], "summary": {...} } }"""
+        if EMBED_CACHE_FILE.exists():
+            try:
+                data = json.loads(EMBED_CACHE_FILE.read_text(encoding="utf-8-sig"))
+                if isinstance(data, dict) and "entries" in data:
+                    return data
+            except Exception:
+                pass
+        return {"entries": {}, "updated_at": ""}
+
+    def _save_embed_cache(self, cache: dict):
+        """原子写入嵌入缓存。"""
+        EMBED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cache["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tmp = EMBED_CACHE_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, EMBED_CACHE_FILE)
+        logger.info(f"[ObsidianSync] 嵌入缓存已保存，共 {len(cache.get('entries', {}))} 条")
+
     # ── 文件扫描 ──────────────────────────────────────────
 
     def _scan_files(self):
@@ -243,78 +264,29 @@ class ObsidianSync(Star):
                     return title
         return path.stem
 
-    # ── 增量构建 ──────────────────────────────────────────
-
-    def _do_incremental_build(self, changed_files: list):
-        summaries = []
-        for md in changed_files:
-            try:
-                text = md.read_text(encoding="utf-8")
-                if not text.strip():
-                    continue
-                rel = str(md.relative_to(self._obsidian_dir)).replace("\\", "/")
-                title = self._normalize_doc_name(md, text)
-                summaries.append({
-                    "text": text,
-                    "source": rel,
-                    "title": title,
-                    "name": title,
-                    "doc_name": title,
-                })
-            except Exception as e:
-                logger.warning(f"[ObsidianSync] 读取 {md.name} 失败: {e}")
-
-        if not summaries:
-            return
-
-        tmp_sum = TMP_DIR / "obsidian_sync_tmp_summaries.json"
-        tmp_emb = TMP_DIR / "obsidian_sync_tmp_embeddings.json"
-        TMP_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_sum.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        logger.info(f"[ObsidianSync] 嵌入 {len(summaries)} 个文件...")
-        r1 = self._run_subprocess([sys.executable, str(EMBED_SCRIPT), str(tmp_sum), "-o", str(tmp_emb)], 600)
-        if r1.returncode != 0 or not tmp_emb.exists():
-            logger.error(f"[ObsidianSync] embed.py 失败: {(r1.stderr or r1.stdout)[-500:]}")
-            self._write_status(ok=False, stage="embed", message="embed.py failed", changed=len(changed_files), kb_name=self._kb_name)
-            self._persist_readonly_status(ok=False, message="embed.py failed", stage="embed", changed=len(changed_files))
-            return
-
-        logger.info("[ObsidianSync] 构建知识库增量...")
-        r2 = self._run_subprocess([
-            sys.executable, str(BUILD_SCRIPT), str(tmp_emb),
-            "--name", self._kb_name, "--file-id", self._kb_file_id,
-            "--data-dir", str(ASTRBOT_DATA)
-        ], 300)
-        if r2.returncode != 0:
-            logger.error(f"[ObsidianSync] build_kb.py 失败: {(r2.stderr or r2.stdout)[-500:]}")
-            self._write_status(ok=False, stage="build", message="build_kb.py failed", changed=len(changed_files), kb_name=self._kb_name)
-            self._persist_readonly_status(ok=False, message="build_kb.py failed", stage="build", changed=len(changed_files))
-        else:
-            logger.info(f"[ObsidianSync] 增量同步完成 ({len(summaries)} 文件)")
-            self._write_status(ok=True, stage="build", message="sync ok", changed=len(changed_files), kb_name=self._kb_name)
-            self._persist_readonly_status(ok=True, message="sync ok", stage="build", changed=len(changed_files))
-
-        for tmp in [tmp_sum, tmp_emb]:
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
-
-    # ── 主同步逻辑 ────────────────────────────────────────
+    # ── 同步逻辑（增量嵌入 + 全量构建）────────────────────
 
     def _do_sync(self):
+        """
+        核心同步逻辑：
+        1. 扫描所有 md 文件，检测变更
+        2. 只对变更文件调用嵌入 API（省 token）
+        3. 将新嵌入合并到本地缓存
+        4. 从缓存中移除已删除文件的条目
+        5. 将全量缓存写为 embeddings.json 传给 build_kb.py
+        6. build_kb.py 用全量数据重建索引
+        """
         all_files = self._scan_files()
         if not all_files:
             self._write_status(ok=False, stage="scan", message="obsidian dir empty or missing", changed=0, kb_name=self._kb_name)
             self._persist_readonly_status(ok=False, message="obsidian dir empty or missing", stage="scan", changed=0)
             return
 
+        # 检测变更
         old_state = self._load_state().get("files", {})
-        new_state = {}
-        changed = []
+        changed_files = []
         current_paths = set()
+        new_state = {}
 
         for md in all_files:
             path_str = str(md)
@@ -323,25 +295,166 @@ class ObsidianSync(Star):
             new_state[path_str] = {"mtime_ns": st.st_mtime_ns, "size": st.st_size}
             prev = old_state.get(path_str)
             if not prev or prev.get("mtime_ns") != st.st_mtime_ns or prev.get("size") != st.st_size:
-                changed.append(md)
+                changed_files.append(md)
 
-        deleted = [p for p in old_state.keys() if p not in current_paths]
+        deleted_paths = [p for p in old_state.keys() if p not in current_paths]
+        has_changes = bool(changed_files) or bool(deleted_paths)
 
-        if not changed and not deleted:
+        # 更新文件状态
+        self._save_state({"files": new_state, "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+
+        if not has_changes:
             logger.info("[ObsidianSync] 无变更，跳过同步")
             self._write_status(ok=True, stage="idle", message="no changes", changed=0, deleted=0, kb_name=self._kb_name)
             self._persist_readonly_status(ok=True, message="无变更，跳过", stage="idle", changed=0, deleted=0)
             return
 
-        self._save_state({"files": new_state, "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-        logger.info(f"[ObsidianSync] 检测到变更: {len(changed)} 新增/修改, {len(deleted)} 删除")
-        self._write_status(ok=True, stage="scan", message="changes detected", changed=len(changed), deleted=len(deleted), kb_name=self._kb_name)
+        logger.info(f"[ObsidianSync] 检测到变更: {len(changed_files)} 新增/修改, {len(deleted_paths)} 删除")
+        self._write_status(ok=True, stage="scan", message="changes detected", changed=len(changed_files), deleted=len(deleted_paths), kb_name=self._kb_name)
 
-        if changed:
-            self._do_incremental_build(changed)
+        # 加载嵌入缓存
+        cache = self._load_embed_cache()
+        entries = cache.get("entries", {})
+
+        # 步骤1: 移除已删除文件的缓存
+        for dp in deleted_paths:
+            rel = pathlib.Path(dp).relative_to(self._obsidian_dir).as_posix()  # noqa
+            entries.pop(rel, None)
+            entries.pop(dp, None)
+        if deleted_paths:
+            logger.info(f"[ObsidianSync] 从缓存中移除 {len(deleted_paths)} 个已删除文件")
+
+        # 步骤2: 嵌入变更文件
+        if changed_files:
+            changed_summaries = []
+            for md in changed_files:
+                try:
+                    text = md.read_text(encoding="utf-8")
+                    if not text.strip():
+                        continue
+                    rel = str(md.relative_to(self._obsidian_dir)).replace("\\", "/")
+                    title = self._normalize_doc_name(md, text)
+                    changed_summaries.append({
+                        "text": text,
+                        "source": rel,
+                        "title": title,
+                        "name": title,
+                        "doc_name": title,
+                    })
+                except Exception as e:
+                    logger.warning(f"[ObsidianSync] 读取 {md.name} 失败: {e}")
+
+            if not changed_summaries:
+                logger.info("[ObsidianSync] 变更文件均为空，跳过嵌入")
+                self._write_status(ok=True, stage="build", message="empty files only", changed=len(changed_files), kb_name=self._kb_name)
+                self._persist_readonly_status(ok=True, message="变更文件均为空", stage="build", changed=len(changed_files))
+                return
+
+            tmp_sum = TMP_DIR / "obsidian_sync_tmp_summaries.json"
+            tmp_emb = TMP_DIR / "obsidian_sync_tmp_embeddings.json"
+            TMP_DIR.mkdir(parents=True, exist_ok=True)
+            tmp_sum.write_text(json.dumps(changed_summaries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            logger.info(f"[ObsidianSync] 嵌入 {len(changed_summaries)} 个变更文件（仅变更部分消耗 API Token）...")
+            r1 = self._run_subprocess([sys.executable, str(EMBED_SCRIPT), str(tmp_sum), "-o", str(tmp_emb)], 600)
+            if r1.returncode != 0 or not tmp_emb.exists():
+                logger.error(f"[ObsidianSync] embed.py 失败: {(r1.stderr or r1.stdout)[-500:]}")
+                self._write_status(ok=False, stage="embed", message="embed.py failed", changed=len(changed_files), kb_name=self._kb_name)
+                self._persist_readonly_status(ok=False, message="embed.py failed", stage="embed", changed=len(changed_files))
+                for tmp in [tmp_sum, tmp_emb]:
+                    try:
+                        if tmp.exists():
+                            tmp.unlink()
+                    except Exception:
+                        pass
+                return
+
+            # 步骤3: 读取新嵌入，更新缓存
+            try:
+                emb_data = json.loads(tmp_emb.read_text(encoding="utf-8-sig"))
+                new_embeddings = emb_data.get("embeddings", [])
+                new_summaries = emb_data.get("summaries", changed_summaries)
+                for i, summary in enumerate(new_summaries):
+                    source = summary.get("source", "")
+                    if source and i < len(new_embeddings):
+                        entries[source] = {
+                            "embedding": new_embeddings[i],
+                            "summary": summary,
+                        }
+                logger.info(f"[ObsidianSync] 缓存更新: +{len(new_summaries)} 条新嵌入")
+            except Exception as e:
+                logger.error(f"[ObsidianSync] 读取嵌入结果失败: {e}")
+                self._write_status(ok=False, stage="embed", message=f"read embeddings failed: {e}", changed=len(changed_files), kb_name=self._kb_name)
+                self._persist_readonly_status(ok=False, message=f"读取嵌入结果失败", stage="embed", changed=len(changed_files))
+                for tmp in [tmp_sum, tmp_emb]:
+                    try:
+                        if tmp.exists():
+                            tmp.unlink()
+                    except Exception:
+                        pass
+                return
+
+            # 清理临时文件
+            for tmp in [tmp_sum, tmp_emb]:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except Exception:
+                    pass
+
+        # 步骤4: 保存更新后的缓存
+        cache["entries"] = entries
+        self._save_embed_cache(cache)
+
+        # 步骤5: 从缓存构建全量 embeddings.json 传给 build_kb.py
+        if not entries:
+            logger.warning("[ObsidianSync] 缓存为空，无法构建知识库")
+            self._write_status(ok=False, stage="build", message="cache empty", changed=len(changed_files), kb_name=self._kb_name)
+            self._persist_readonly_status(ok=False, message="缓存为空", stage="build", changed=len(changed_files))
+            return
+
+        all_summaries = []
+        all_embeddings = []
+        for source, entry in entries.items():
+            all_summaries.append(entry.get("summary", {"source": source}))
+            all_embeddings.append(entry.get("embedding", []))
+
+        full_emb = TMP_DIR / "obsidian_sync_full_embeddings.json"
+        full_emb.write_text(
+            json.dumps({"embeddings": all_embeddings, "summaries": all_summaries}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        # 步骤6: 全量构建知识库
+        logger.info(f"[ObsidianSync] 构建知识库（全量 {len(all_summaries)} 条向量）...")
+        r2 = self._run_subprocess([
+            sys.executable, str(BUILD_SCRIPT), str(full_emb),
+            "--name", self._kb_name, "--file-id", self._kb_file_id,
+            "--data-dir", str(ASTRBOT_DATA)
+        ], 300)
+
+        try:
+            if full_emb.exists():
+                full_emb.unlink()
+        except Exception:
+            pass
+
+        if r2.returncode != 0:
+            logger.error(f"[ObsidianSync] build_kb.py 失败: {(r2.stderr or r2.stdout)[-500:]}")
+            self._write_status(ok=False, stage="build", message="build_kb.py failed", changed=len(changed_files), kb_name=self._kb_name)
+            self._persist_readonly_status(ok=False, message="build_kb.py failed", stage="build", changed=len(changed_files))
         else:
-            # 只有删除没有新增时也需要写回状态
-            self._persist_readonly_status(ok=True, message="deleted only", stage="scan", changed=0, deleted=len(deleted))
+            total = len(all_summaries)
+            api_count = len(changed_files) if changed_files else 0
+            logger.info(f"[ObsidianSync] 同步完成！知识库共 {total} 条，本次 API 调用 {api_count} 条")
+            self._write_status(ok=True, stage="build", message="sync ok", changed=len(changed_files), deleted=len(deleted_paths), kb_name=self._kb_name)
+            self._persist_readonly_status(
+                ok=True,
+                message=f"sync ok (总{total}条, API调用{api_count}条)",
+                stage="build",
+                changed=len(changed_files),
+                deleted=len(deleted_paths),
+            )
 
     # ── 同步循环 ──────────────────────────────────────────
 
@@ -360,7 +473,6 @@ class ObsidianSync(Star):
         while not self._stop_event.is_set():
             self._reload_config()
             wait = self._get_wait_seconds()
-            # 把等待拆成 15 秒小段，每段检查一次手动同步请求
             remaining = wait
             while remaining > 0 and not self._stop_event.is_set():
                 chunk = min(15, remaining)
