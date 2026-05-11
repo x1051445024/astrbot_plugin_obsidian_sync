@@ -1,0 +1,89 @@
+{
+  "obsidian_dir": {
+    "description": "Obsidian 笔记目录路径",
+    "type": "string",
+    "hint": "本地 Obsidian vault 的完整路径，例如 D:/AstrBotData/Obsidian",
+    "obvious_hint": true,
+    "default": "D:/AstrBotData/Obsidian"
+  },
+  "sync_mode": {
+    "description": "同步模式",
+    "type": "string",
+    "hint": "选择同步频率：daily=每天定时，interval=每隔固定时间",
+    "default": "daily",
+    "options": ["daily", "interval"]
+  },
+  "sync_daily_time": {
+    "description": "每日定时同步时间（仅在同步模式为 daily 时生效）",
+    "type": "string",
+    "hint": "24小时制，格式 HH:MM，例如 03:00 表示凌晨3点同步",
+    "default": "03:00"
+  },
+  "sync_interval_hours": {
+    "description": "定时间隔（仅在同步模式为 interval 时生效）",
+    "type": "int",
+    "hint": "每隔多少小时同步一次，最小1小时",
+    "default": 24,
+    "obvious_hint": false
+  },
+  "sync_on_startup": {
+    "description": "启动后是否立即执行一次同步",
+    "type": "bool",
+    "hint": "开启后插件加载完成会立刻做一次全量检查；关闭则等到下一个定时点再同步",
+    "default": false
+  },
+  "sync_now_request": {
+    "description": "手动同步请求",
+    "type": "bool",
+    "hint": "勾选后会立即执行一次同步，完成后自动恢复为 false",
+    "default": false
+  },
+  "last_sync_time": {
+    "description": "上次同步时间",
+    "type": "string",
+    "hint": "插件自动写回的只读状态，用于查看最后一次同步时间",
+    "default": "-"
+  },
+  "last_sync_status": {
+    "description": "上次同步状态",
+    "type": "string",
+    "hint": "插件自动写回的只读状态，如 成功/失败/未同步",
+    "default": "未同步"
+  },
+  "last_sync_message": {
+    "description": "上次同步说明",
+    "type": "text",
+    "hint": "插件自动写回的只读状态，用于显示上次同步的简要说明",
+    "default": "暂无"
+  },
+  "kb_name": {
+    "description": "AstrBot 知识库名称",
+    "type": "string",
+    "hint": "与 AstrBot 知识库页面中创建的名称一致",
+    "default": "Obsidian-Vault"
+  },
+  "kb_file_id": {
+    "description": "知识库文件标识",
+    "type": "string",
+    "hint": "知识库的 ASCII 文件标识，用于 FAISS 索引文件命名",
+    "default": "obsidian_vault"
+  },
+  "restrict_commands": {
+    "description": "是否限制手动命令权限",
+    "type": "bool",
+    "hint": "开启后，/obsync 和 /obsync_status 仅允许白名单内用户使用",
+    "default": true
+  },
+  "admin_user_ids": {
+    "description": "管理员 QQ 号白名单",
+    "type": "list",
+    "hint": "填写允许执行手动命令的 QQ 号，例如 [12345678, 87654321]",
+    "default": []
+  },
+  "allowed_user_ids": {
+    "description": "额外允许的 QQ 号白名单",
+    "type": "list",
+    "hint": "除管理员外，额外允许执行手动命令的 QQ 号列表",
+    "default": []
+  }
+}

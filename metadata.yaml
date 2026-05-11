@@ -1,0 +1,6 @@
+name: obsidian_sync
+display_name: Obsidian 知识库同步
+version: "0.5.0"
+description: 定时监听本地 Obsidian 目录，自动增量同步 Markdown 笔记到 AstrBot 知识库。支持每日定时和定时间隔两种模式，可在 WebUI 配置面板设置。
+author: 牧濑红莉栖
+astrbot_version: ">=4.5,<5"
