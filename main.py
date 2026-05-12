@@ -1,7 +1,7 @@
-"""
-Obsidian 知识库同步插件 for AstrBot
+"""Obsidian 知识库同步插件 for AstrBot
 ==================================
-v0.8.0 — 代码审查优化版
+v0.8.1 — 兼容性修复版
+
 - 支持每日定时或定时间隔同步
 - 通过 WebUI 配置面板设置参数
 - 检测 Obsidian 目录变更后自动增量更新知识库
@@ -20,7 +20,13 @@ v0.8.0 变更:
 - [OPT] 临时文件名加 PID 防多实例冲突
 - [OPT] 合并 obsync/obsync_now 为单一 obsync 指令
 - [OPT] 异常捕获粒度细化，不再吞掉所有 Exception
+
+v0.8.1 变更:
+- [FIX] 确保生成的知识库存储格式兼容 AstrBot 新版 FaissStore (astrbot_faiss_store)
+- [DOC] 补充兼容性说明：若知识库只能看文档数但正文为空，需检查知识库插件是否使用新版 Store
+- [FIX] 优化文档名修复脚本 fix_kb_doc_names.py 的路径检测
 """
+
 import sys
 import json
 import pathlib
@@ -35,12 +41,10 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-
 # ── 常量 ─────────────────────────────────────────────────
-
-MAX_CACHE_ENTRIES = 2000          # 缓存条目上限，超出时发出性能警告
+MAX_CACHE_ENTRIES = 2000       # 缓存条目上限，超出时发出性能警告
 MAX_FILE_SIZE_BYTES = 512 * 1024  # 512KB — 超过此大小的 md 不做嵌入
-CACHE_KEY_VERSION = 1             # 缓存 key 格式版本，用于格式迁移
+CACHE_KEY_VERSION = 1         # 缓存 key 格式版本，用于格式迁移
 
 
 def _detect_data_dir() -> pathlib.Path:
@@ -76,7 +80,7 @@ def _posix_relative(md: pathlib.Path, obsidian_dir: pathlib.Path) -> str:
     return md.relative_to(obsidian_dir).as_posix()
 
 
-@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.8.0")
+@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.8.1")
 class ObsidianSync(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -85,7 +89,6 @@ class ObsidianSync(Star):
         self._manual_trigger = threading.Event()
         self._sync_lock = threading.Lock()
         self._thread = threading.Thread(target=self._sync_loop, daemon=True)
-
         self._obsidian_dir = pathlib.Path(self._config.get("obsidian_dir", "D:/AstrBotData/Obsidian"))
         self._sync_mode = self._config.get("sync_mode", "daily")
         self._sync_daily_time = self._config.get("sync_daily_time", "03:00")
@@ -105,7 +108,6 @@ class ObsidianSync(Star):
         )
 
     # ── 配置文件统一读写 ──────────────────────────────────
-
     def _read_config_file(self) -> dict:
         """读取 WebUI 配置文件，失败返回空字典。"""
         if not CONFIG_FILE.exists():
@@ -125,7 +127,6 @@ class ObsidianSync(Star):
         os.replace(tmp, CONFIG_FILE)
 
     # ── 权限检查 ──────────────────────────────────────────
-
     def _is_admin_or_allowed(self, event: AstrMessageEvent) -> bool:
         if not self._restrict_commands:
             return True
@@ -136,7 +137,6 @@ class ObsidianSync(Star):
         return uid in self._admin_user_ids or uid in self._allowed_user_ids
 
     # ── 状态文件写入 ──────────────────────────────────────
-
     def _write_status(self, **kwargs):
         STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
         status = {
@@ -183,7 +183,6 @@ class ObsidianSync(Star):
             logger.warning(f"[ObsidianSync] 写回状态到配置失败: {e}")
 
     # ── 配置热更新 ────────────────────────────────────────
-
     def _reload_config(self):
         cfg = self._read_config_file()
         if not cfg:
@@ -207,7 +206,6 @@ class ObsidianSync(Star):
         return bool(cfg.get("sync_now_request", False))
 
     # ── 定时计算（基于上次同步结束时间） ─────────────────
-
     def _get_wait_seconds(self) -> float:
         now = datetime.datetime.now()
         if self._sync_mode == "daily":
@@ -221,6 +219,7 @@ class ObsidianSync(Star):
             wait = (target - now).total_seconds()
             logger.info(f"[ObsidianSync] 下次定时同步: {target.strftime('%Y-%m-%d %H:%M')}（{wait / 3600:.1f}h 后）")
             return wait
+
         # 间隔模式：从上次同步结束时算起
         elapsed = now.timestamp() - self._last_sync_end_time
         interval = self._sync_interval_hours * 3600
@@ -229,7 +228,6 @@ class ObsidianSync(Star):
         return remaining
 
     # ── 文件状态持久化 ────────────────────────────────────
-
     def _load_state(self) -> dict[str, Any]:
         if FILE_STATE_FILE.exists():
             try:
@@ -246,7 +244,6 @@ class ObsidianSync(Star):
         os.replace(tmp, FILE_STATE_FILE)
 
     # ── 嵌入缓存 ──────────────────────────────────────────
-
     def _load_embed_cache(self) -> dict:
         if EMBED_CACHE_FILE.exists():
             try:
@@ -268,7 +265,6 @@ class ObsidianSync(Star):
         logger.info(f"[ObsidianSync] 嵌入缓存已保存，共 {len(cache.get('entries', {}))} 条")
 
     # ── 文件扫描 ──────────────────────────────────────────
-
     def _scan_files(self) -> list[pathlib.Path]:
         if not self._obsidian_dir.exists():
             logger.warning(f"[ObsidianSync] 目录不存在: {self._obsidian_dir}")
@@ -276,12 +272,10 @@ class ObsidianSync(Star):
         return [f for f in self._obsidian_dir.rglob("*.md") if ".obsidian" not in f.parts]
 
     # ── 子进程工具 ────────────────────────────────────────
-
     def _run_subprocess(self, cmd: list, timeout: int):
         return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
     # ── 文档名规范化 ──────────────────────────────────────
-
     @staticmethod
     def _normalize_doc_name(path: pathlib.Path, text: str) -> str:
         """从文件前 8 行提取 # 标题作为文档名，找不到就用文件名。"""
@@ -295,7 +289,6 @@ class ObsidianSync(Star):
         return path.stem
 
     # ── 临时文件清理 ──────────────────────────────────────
-
     @staticmethod
     def _cleanup_temps(*paths: pathlib.Path):
         for p in paths:
@@ -306,7 +299,6 @@ class ObsidianSync(Star):
                 pass
 
     # ── 核心同步逻辑 ─────────────────────────────────────
-
     def _do_sync(self) -> tuple[bool, str]:
         """
         核心同步入口。通过 _sync_lock 保证同一时刻只有一个同步任务在执行。
@@ -352,7 +344,6 @@ class ObsidianSync(Star):
         changed_files = []
         current_paths = set()
         new_state = {}
-
         for md in valid_files:
             path_str = str(md)
             current_paths.add(path_str)
@@ -520,8 +511,10 @@ class ObsidianSync(Star):
         try:
             r2 = self._run_subprocess(
                 [
-                    sys.executable, str(BUILD_SCRIPT), str(full_emb),
-                    "--name", self._kb_name, "--file-id", self._kb_file_id,
+                    sys.executable, str(BUILD_SCRIPT),
+                    str(full_emb),
+                    "--name", self._kb_name,
+                    "--file-id", self._kb_file_id,
                     "--data-dir", str(ASTRBOT_DATA),
                 ],
                 300,
@@ -548,7 +541,6 @@ class ObsidianSync(Star):
         return True, result_msg
 
     # ── 同步循环（后台线程） ─────────────────────────────
-
     def _sync_loop(self):
         if self._sync_on_startup:
             try:
@@ -569,13 +561,16 @@ class ObsidianSync(Star):
                 chunk = min(15, remaining)
                 self._stop_event.wait(chunk)
                 remaining -= chunk
-                # 检测两种手动触发方式
-                if self._check_manual_sync() or self._manual_trigger.is_set():
-                    logger.info("[ObsidianSync] 检测到手动同步请求，立即执行...")
-                    self._manual_trigger.clear()
-                    break
+
+            # 检测两种手动触发方式
+            if self._check_manual_sync() or self._manual_trigger.is_set():
+                logger.info("[ObsidianSync] 检测到手动同步请求，立即执行...")
+                self._manual_trigger.clear()
+                break
+
             if self._stop_event.is_set():
                 break
+
             try:
                 self._do_sync()
             except Exception as e:
@@ -584,7 +579,6 @@ class ObsidianSync(Star):
                 self._persist_readonly_status(ok=False, message=str(e)[:300], stage="sync", changed=0)
 
     # ── 聊天指令 ──────────────────────────────────────────
-
     @filter.command("obsync")
     async def manual_sync(self, event: AstrMessageEvent):
         '''手动触发 Obsidian 知识库同步'''
@@ -623,7 +617,6 @@ class ObsidianSync(Star):
             yield event.plain_result(f"读取状态失败: {e}")
 
     # ── 生命周期 ──────────────────────────────────────────
-
     async def terminate(self):
         self._stop_event.set()
         self._manual_trigger.set()  # 唤醒可能在等待的循环
