@@ -21,10 +21,10 @@ v0.8.0 变更:
 - [OPT] 合并 obsync/obsync_now 为单一 obsync 指令
 - [OPT] 异常捕获粒度细化，不再吞掉所有 Exception
 
-v0.8.1 变更:
-- [FIX] 确保生成的知识库存储格式兼容 AstrBot 新版 FaissStore (astrbot_faiss_store)
-- [DOC] 补充兼容性说明：若知识库只能看文档数但正文为空，需检查知识库插件是否使用新版 Store
-- [FIX] 优化文档名修复脚本 fix_kb_doc_names.py 的路径检测
+v0.9.0 变更:
+- [FIX] 启动时依赖检测：检查 embed.py 和 build_kb.py 是否存在
+- [FIX] 将 embed.py、build_kb.py 打包进插件 scripts/ 目录，不再依赖外部 skill
+- [DOC] README 补充依赖说明
 """
 
 import sys
@@ -40,6 +40,16 @@ from typing import Any
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+
+
+def _check_required_scripts(embed_script: pathlib.Path, build_script: pathlib.Path) -> list[str]:
+    """检测必需脚本是否存在，返回缺失列表。"""
+    missing = []
+    if not embed_script.exists():
+        missing.append(str(embed_script))
+    if not build_script.exists():
+        missing.append(str(build_script))
+    return missing
 
 # ── 常量 ─────────────────────────────────────────────────
 MAX_CACHE_ENTRIES = 2000       # 缓存条目上限，超出时发出性能警告
@@ -65,8 +75,10 @@ def _detect_data_dir() -> pathlib.Path:
 
 
 ASTRBOT_DATA = _detect_data_dir()
-EMBED_SCRIPT = ASTRBOT_DATA / "skills" / "kb-importer-1.0.0" / "scripts" / "embed.py"
-BUILD_SCRIPT = ASTRBOT_DATA / "skills" / "kb-importer-1.0.0" / "scripts" / "build_kb.py"
+# 插件自带的脚本目录（免外部依赖）
+_PLUGIN_SCRIPTS = pathlib.Path(__file__).resolve().parent / "scripts"
+EMBED_SCRIPT = _PLUGIN_SCRIPTS / "embed.py"
+BUILD_SCRIPT = _PLUGIN_SCRIPTS / "build_kb.py"
 TMP_DIR = ASTRBOT_DATA / "plugin_data"
 STATUS_FILE = ASTRBOT_DATA / "plugin_data" / "obsidian_sync_status.json"
 REPORT_FILE = ASTRBOT_DATA / "plugin_data" / "obsidian_sync_status.md"
@@ -80,7 +92,7 @@ def _posix_relative(md: pathlib.Path, obsidian_dir: pathlib.Path) -> str:
     return md.relative_to(obsidian_dir).as_posix()
 
 
-@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.8.1")
+@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.9.0")
 class ObsidianSync(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -100,6 +112,22 @@ class ObsidianSync(Star):
         self._allowed_user_ids = set(str(x) for x in self._config.get("allowed_user_ids", []))
         self._sync_on_startup = bool(self._config.get("sync_on_startup", False))
         self._last_sync_end_time: float = 0.0  # 上次同步结束的 Unix 时间戳
+
+        # ── 依赖检测 ────────────────────────────────────────
+        missing = _check_required_scripts(EMBED_SCRIPT, BUILD_SCRIPT)
+        if missing:
+            logger.error(
+                f"[ObsidianSync] ❌ 缺失必需脚本:
+"
+                f"  - {EMBED_SCRIPT}
+"
+                f"  - {BUILD_SCRIPT}
+"
+                f"请确保 scripts/ 目录完整，或重新安装本插件。"
+            )
+            raise RuntimeError(f"缺失必需脚本: {', '.join(missing)}")
+        else:
+            logger.info("[ObsidianSync] ✓ 依赖脚本检测通过")
 
         self._thread.start()
         logger.info(
