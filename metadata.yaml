@@ -1,7 +1,22 @@
 name: obsidian_sync
 display_name: Obsidian 知识库同步
-version: "0.9.0"
+version: "0.9.1"
 description: 定时监听本地 Obsidian 目录，自动增量同步 Markdown 笔记到 AstrBot 知识库。支持每日定时和定时间隔两种模式，可在 WebUI 配置面板设置。
 author: 牧濑红莉栖
 short_desc: Obsidian 笔记自动同步到 AstrBot 知识库
 astrbot_version: ">=4.5,<5"
+
+config:
+  obsidian_dir:
+    name: Obsidian 目录路径
+    description: "Windows 示例: D:/AstrBotData/Obsidian
+Linux 示例: /home/username/Obsidian"
+  sync_mode:
+    name: 同步模式
+    description: "daily=每日固定时间，interval=定时间隔"
+  sync_daily_time:
+    name: 每日同步时间
+    description: "格式 HH:MM，如 03:00"
+  sync_interval_hours:
+    name: 同步间隔（小时）
+    description: "间隔模式下生效，最小 1 小时"

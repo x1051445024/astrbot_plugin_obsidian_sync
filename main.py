@@ -1,6 +1,6 @@
 """Obsidian 知识库同步插件 for AstrBot
 ==================================
-v0.8.1 — 兼容性修复版
+v0.9.1 — 跨平台路径修复版
 
 - 支持每日定时或定时间隔同步
 - 通过 WebUI 配置面板设置参数
@@ -20,6 +20,10 @@ v0.8.0 变更:
 - [OPT] 临时文件名加 PID 防多实例冲突
 - [OPT] 合并 obsync/obsync_now 为单一 obsync 指令
 - [OPT] 异常捕获粒度细化，不再吞掉所有 Exception
+
+v0.9.1 变更:
+- [FIX] 跨平台路径支持：默认路径改为平台感知，Windows 用 D:/，Linux/macOS 用 ~/Obsidian
+- [FIX] 配置热更新时统一将反斜杠替换为正斜杠，解决 WebUI 路径填写兼容性问题
 
 v0.9.0 变更:
 - [FIX] 启动时依赖检测：检查 embed.py 和 build_kb.py 是否存在
@@ -92,7 +96,7 @@ def _posix_relative(md: pathlib.Path, obsidian_dir: pathlib.Path) -> str:
     return md.relative_to(obsidian_dir).as_posix()
 
 
-@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.9.0")
+@register("obsidian_sync", "牧濑红莉栖", "监听本地 Obsidian 目录，定时同步到 AstrBot 知识库", "0.9.1")
 class ObsidianSync(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -101,7 +105,8 @@ class ObsidianSync(Star):
         self._manual_trigger = threading.Event()
         self._sync_lock = threading.Lock()
         self._thread = threading.Thread(target=self._sync_loop, daemon=True)
-        self._obsidian_dir = pathlib.Path(self._config.get("obsidian_dir", "D:/AstrBotData/Obsidian"))
+        _default_dir = "D:/AstrBotData/Obsidian" if sys.platform == "win32" else str(pathlib.Path.home() / "Obsidian")
+        self._obsidian_dir = pathlib.Path(self._config.get("obsidian_dir", _default_dir))
         self._sync_mode = self._config.get("sync_mode", "daily")
         self._sync_daily_time = self._config.get("sync_daily_time", "03:00")
         self._sync_interval_hours = max(1, int(self._config.get("sync_interval_hours", 24)))
@@ -216,7 +221,8 @@ class ObsidianSync(Star):
         if not cfg:
             return
         try:
-            self._obsidian_dir = pathlib.Path(cfg.get("obsidian_dir", str(self._obsidian_dir)))
+            raw_path = str(cfg.get("obsidian_dir", str(self._obsidian_dir))).replace("\\", "/")
+            self._obsidian_dir = pathlib.Path(raw_path)
             self._sync_mode = cfg.get("sync_mode", self._sync_mode)
             self._sync_daily_time = cfg.get("sync_daily_time", self._sync_daily_time)
             self._sync_interval_hours = max(1, int(cfg.get("sync_interval_hours", self._sync_interval_hours)))
